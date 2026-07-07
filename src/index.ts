@@ -34,11 +34,15 @@ const MONTHS = {
 //************************************************
 //******************* Utils **********************
 //************************************************
+function validateFiniteNumber(value: string | boolean | number | null | undefined): { valid: false } | { valid: true; value: number } {
+  if (value === null || value === undefined) return { valid: false };
+  if (typeof value === "boolean") return { valid: false };
+  if (typeof value === "string" && value.trim() === "") return { valid: false };
 
-function parseNumber(value: string) {
-  if (value === "true" || value === "false" || value === "") return NaN;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return { valid: false };
 
-  return Number(value);
+  return { valid: true, value: num };
 }
 
 // query database
@@ -68,6 +72,15 @@ function getDay(date: Date, format: Intl.DateTimeFormatOptions["day"] = "2-digit
   return date.toLocaleDateString(undefined, { day: format });
 }
 
+function getTime(
+  date: Date,
+  hourFormat: Intl.DateTimeFormatOptions["hour"] = "2-digit",
+  minuteFormat: Intl.DateTimeFormatOptions["minute"] = "2-digit",
+  hour12Format: Intl.DateTimeFormatOptions["hour12"] = true,
+) {
+  return date.toLocaleTimeString(undefined, { hour: hourFormat, minute: minuteFormat, hour12: hour12Format });
+}
+
 //************************************************
 //***************** Services *********************
 //************************************************
@@ -76,7 +89,9 @@ type AddServiceProps = {
   amount: number;
 };
 
-async function addService(props: AddServiceProps): Promise<{ success: true; message: string } | { success: false; error: string }> {
+async function addService(
+  props: AddServiceProps,
+): Promise<{ success: true; message: string; data: Expense } | { success: false; error: string }> {
   try {
     const json = await queryDatabase(DB_PATH);
     const data = JSON.parse(json) as Expense[];
@@ -97,7 +112,7 @@ async function addService(props: AddServiceProps): Promise<{ success: true; mess
     const newDate = [...data, newExpense];
 
     await writeDatabase(DB_PATH, JSON.stringify(newDate));
-    return { success: true, message: `Expense added successfully (ID: ${newExpense.id})` };
+    return { success: true, data: newExpense, message: `Expense added successfully (ID: ${newExpense.id})` };
   } catch (error) {
     return { success: false, error: `Failed to create expense. Please try again.` };
   }
@@ -109,7 +124,9 @@ type UpdateServiceProps = {
   amount?: number;
 };
 
-async function updateService(props: UpdateServiceProps): Promise<{ success: true; message: string } | { success: false; error: string }> {
+async function updateService(
+  props: UpdateServiceProps,
+): Promise<{ success: true; message: string; data: Expense } | { success: false; error: string }> {
   try {
     const json = await queryDatabase(DB_PATH);
     const data = JSON.parse(json) as Expense[];
@@ -131,10 +148,10 @@ async function updateService(props: UpdateServiceProps): Promise<{ success: true
       updatedExpense["amount"] = props.amount;
     }
 
-    const newDate = data.with(expenseIndex, updatedExpense);
+    const newData = data.with(expenseIndex, updatedExpense);
 
-    await writeDatabase(DB_PATH, JSON.stringify(newDate));
-    return { success: true, message: `Expense with ID = ${props.id} updated successfully.` };
+    await writeDatabase(DB_PATH, JSON.stringify(newData));
+    return { success: true, message: `Expense with ID = ${props.id} updated successfully.`, data: updatedExpense };
   } catch (error) {
     return { success: false, error: `Failed to updated expense. Please try again.` };
   }
@@ -151,12 +168,14 @@ async function listService() {
 
     const createdAt = `${getDay(cat)} ${getMonth(cat)}, ${getYear(cat)}`;
     const updatedAt = `${getDay(uat)} ${getMonth(uat)}, ${getYear(uat)}`;
+    const startTime = getTime(cat);
+    const endTime = getTime(uat);
 
     console.log("Id: ", expense.id);
     console.log("Description: ", expense.description);
     console.log("Amount: ", expense.amount);
-    console.log("Created At: ", createdAt);
-    console.log("Updated At: ", updatedAt);
+    console.log("Created At: ", `${createdAt} at ${startTime}`);
+    console.log("Updated At: ", `${updatedAt} at ${endTime}`);
     console.log("\n**********************************\n");
   }
 }
@@ -164,11 +183,16 @@ async function listService() {
 type DeleteServiceParams = {
   id: number;
 };
-async function deleteService(params: DeleteServiceParams) {
+async function deleteService(params: DeleteServiceParams): Promise<{ success: true; message: string } | { success: false; error: string }> {
   try {
     const json = await queryDatabase(DB_PATH);
     const data = JSON.parse(json) as Expense[];
     const newData = data.filter((f) => f.id !== params.id);
+
+    if (newData.length === data.length) {
+      // expense not present so no need to re-write same data
+      return { success: true, message: `Expense with ID = ${params.id} deleted successfully.` };
+    }
 
     await writeDatabase(DB_PATH, JSON.stringify(newData));
     return { success: true, message: `Expense with ID = ${params.id} deleted successfully.` };
@@ -189,16 +213,16 @@ async function summaryService(
 
     let total = 0;
 
-    for (const expense of data) {
-      if (params.month) {
+    if (params.month) {
+      total = data.reduce((acc, expense) => {
         const month = Number(getMonth(new Date(expense.createdAt), "numeric"));
-
-        if (month === params.month) {
-          total += expense.amount;
-        }
-      } else {
-        total += expense.amount;
-      }
+        if (month === params.month) return acc + expense.amount;
+        return acc;
+      }, 0);
+    } else {
+      total = data.reduce((acc, expense) => {
+        return acc + expense.amount;
+      }, 0);
     }
 
     return { success: true, data: { total, month: params.month } };
@@ -211,20 +235,19 @@ async function summaryService(
 //***************** Controllers ******************
 //************************************************
 
+// add command
 function addCommand() {
-  const command = new Command();
+  const command = new Command("add");
   command
-    .name("add")
     .description("Add expense")
     .requiredOption("--description <string>", "Description of the expense")
     .requiredOption("--amount <number>", "Amount of the expense", (amount) => {
-      const parsedAmount = Number(amount);
-      if (Number.isNaN(parsedAmount)) {
-        throw new InvalidOptionArgumentError("Amount must be a number");
-      } else if (parsedAmount <= 0) {
-        throw new InvalidOptionArgumentError("Amount must be greater than 0");
+      const num = validateFiniteNumber(amount);
+      const isValidAmount = num.valid && num.value > 0;
+      if (isValidAmount) {
+        return num.value;
       }
-      return parsedAmount;
+      throw new InvalidOptionArgumentError("Amount must be a valid finite number and greater than 0");
     })
     .action(async (props) => {
       const result = await addService(props);
@@ -234,34 +257,34 @@ function addCommand() {
         return;
       }
 
-      console.log(`Success: ${result.message}`);
+      console.log(`Success:: ${result.message}`);
     });
 
   return command;
 }
 
+// update command
 function updateCommand() {
   const command = new Command("update");
 
   command
     .description("Update expense by id")
     .requiredOption("--id <number>", "Id of expense", (id) => {
-      const parsedId = Number(id);
-      if (Number.isNaN(parsedId)) {
-        throw new InvalidOptionArgumentError("Id must be a number");
+      const num = validateFiniteNumber(id);
+      if (!num.valid) {
+        throw new InvalidOptionArgumentError("Id must be a valid finite number");
       }
 
-      return parsedId;
+      return num.value;
     })
-    .option("--description [string]", "Description of the expense")
-    .option("--amount [number]", "Amount of the expense", (amount) => {
-      const parsedAmount = Number(amount);
-      if (Number.isNaN(parsedAmount)) {
-        throw new InvalidOptionArgumentError("Amount must be a number");
-      } else if (parsedAmount <= 0) {
-        throw new InvalidOptionArgumentError("Amount must be greater than 0");
+    .option("--description <string>", "Description of the expense")
+    .option("--amount <number>", "Amount of the expense", (amount) => {
+      const num = validateFiniteNumber(amount);
+      const isValidAmount = num.valid && num.value > 0;
+      if (isValidAmount) {
+        return num.value;
       }
-      return parsedAmount;
+      throw new InvalidOptionArgumentError("Amount must be a valid finite number and greater than 0");
     })
     .action(async (props) => {
       const result = await updateService(props);
@@ -271,28 +294,31 @@ function updateCommand() {
         return;
       }
 
-      console.log(`Success: ${result.message}`);
+      console.log(`Success:: ${result.message}`);
     });
 
   return command;
 }
 
+// list
 function listCommand() {
   const command = new Command("list");
-  command.action(listService);
+  command.description("List all expenses").action(listService);
   return command;
 }
 
+// delete
 function deleteCommand() {
   const command = new Command("delete");
   command
-    .command("delete")
-    .requiredOption("--id <number>", "Delete expense by an id", (id) => {
-      const parsedId = Number(id);
-      if (Number.isNaN(parsedId)) {
-        throw new InvalidOptionArgumentError("Id must be a number");
+    .description("Delete expense by id")
+    .requiredOption("--id <number>", "Id of an expense", (id) => {
+      const num = validateFiniteNumber(id);
+      if (num.valid) {
+        return num.value;
       }
-      return parsedId;
+
+      throw new InvalidOptionArgumentError("Id must be a valid finite number");
     })
     .action(async (params) => {
       const result = await deleteService(params);
@@ -302,7 +328,7 @@ function deleteCommand() {
         return;
       }
 
-      console.log(`Success: ${result.message}`);
+      console.log(`Success:: Expense with ID = ${params.id} deleted successfully.`);
     });
 
   return command;
@@ -315,15 +341,12 @@ function summaryCommand() {
     .description("Get summary of expenses")
     .addOption(
       new Option("--month <number>", "Summary for month").argParser((month) => {
-        const parsedMonth = parseNumber(month);
-
-        const notValidMonth = Number.isNaN(parsedMonth) || parsedMonth < 1 || parsedMonth > 12;
-
-        if (notValidMonth) {
-          throw new InvalidOptionArgumentError("Invalid month. Allowed 1-12 numbers only");
+        const num = validateFiniteNumber(month);
+        const isValidMonth = num.valid && num.value >= 1 && num.value <= 12;
+        if (isValidMonth) {
+          return num.value;
         }
-
-        return parsedMonth;
+        throw new InvalidOptionArgumentError("Invalid month. Allowed 1-12 only");
       }),
     )
     .action(async (props) => {
@@ -336,9 +359,9 @@ function summaryCommand() {
 
       if (result.data.month) {
         const month = result.data.month;
-        console.log(`Total expenses for ${MONTHS[month as keyof typeof MONTHS]}: `, result.data.total);
+        console.log(`Total expenses for ${MONTHS[month as keyof typeof MONTHS]}:: `, result.data.total);
       } else {
-        console.log(`Total expenses: `, result.data.total);
+        console.log(`Total expenses:: `, result.data.total);
       }
     });
 
