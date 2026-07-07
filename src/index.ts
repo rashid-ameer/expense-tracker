@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import path, { parse } from "node:path";
+import fs from "node:fs";
+import promiseFs from "node:fs/promises";
+import path from "node:path";
 import { Command, InvalidOptionArgumentError, Option } from "commander";
 
 // types
@@ -47,17 +47,17 @@ function validateFiniteNumber(value: string | boolean | number | null | undefine
 
 // query database
 async function queryDatabase(path: string) {
-  return await readFile(path, { encoding: "utf-8" });
+  return await promiseFs.readFile(path, { encoding: "utf-8" });
 }
 
 // write to a database
 async function writeDatabase(path: string, data: string) {
-  return await writeFile(path, data);
+  return await promiseFs.writeFile(path, data);
 }
 
 // create a database
 async function createDatabase(path: string) {
-  return await writeFile(path, "[]");
+  return await promiseFs.writeFile(path, "[]");
 }
 
 function getMonth(date: Date, format: Intl.DateTimeFormatOptions["month"] = "short") {
@@ -231,6 +231,34 @@ async function summaryService(
   }
 }
 
+type CsvServiceParams = {
+  name?: string;
+};
+async function csvService(params: CsvServiceParams): Promise<{ message: string; success: true } | { success: false; error: string }> {
+  try {
+    const json = await queryDatabase(DB_PATH);
+    const data = JSON.parse(json) as Expense[];
+    const fileName = params.name ? params.name + ".csv" : "expense.csv";
+    const csvFilePath = path.join(import.meta.dirname, fileName);
+
+    // convert into csv format form
+    let csvStr = "id,description,amount,createdAt,updatedAt\n";
+    data.forEach((expense) => {
+      csvStr += [expense.id, expense.description, expense.amount, expense.createdAt, expense.updatedAt].join(",") + "\n";
+    });
+
+    fs.writeFile(csvFilePath, csvStr, (err) => {
+      if (err) {
+        throw err;
+      }
+    });
+
+    return { success: true, message: "CSV file generated successfully." };
+  } catch (error) {
+    return { success: false, error: "Failed to generate a CSV file. Please try again." };
+  }
+}
+
 //************************************************
 //***************** Controllers ******************
 //************************************************
@@ -334,6 +362,7 @@ function deleteCommand() {
   return command;
 }
 
+// summary
 function summaryCommand() {
   const command = new Command("summary");
 
@@ -368,12 +397,30 @@ function summaryCommand() {
   return command;
 }
 
+// csv
+function csvCommand() {
+  const command = new Command("generate-csv");
+  command
+    .description("Generate csv file")
+    .option("--name <string>", "CSV file name")
+    .action(async (opts) => {
+      const result = await csvService(opts);
+      if ("error" in result) {
+        console.log(`Error:: ${result.error}`);
+        return;
+      }
+
+      console.log(`Success: ${result.message}`);
+    });
+  return command;
+}
+
 //************************************************
 //********************* Main *********************
 //************************************************
 
 async function main() {
-  const dbExists = existsSync(DB_PATH);
+  const dbExists = fs.existsSync(DB_PATH);
   if (!dbExists) {
     try {
       console.log("Info:: Database does not exists. Creating new one. Wait...");
@@ -403,12 +450,17 @@ async function main() {
   // summary command
   const _summaryCommand = summaryCommand();
 
+  // csv command
+  const _csvCommand = csvCommand();
+
   program
     .addCommand(_addCommand)
     .addCommand(_updateCommand)
     .addCommand(_deleteCommand)
     .addCommand(_listCommand, { isDefault: true })
-    .addCommand(_summaryCommand);
+    .addCommand(_summaryCommand)
+    .addCommand(_csvCommand);
+
   await program.parseAsync();
 }
 
